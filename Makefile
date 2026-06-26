@@ -44,7 +44,7 @@ ASFLAGS :=  -g $(ARCH)
 
 LDFLAGS =   -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS    :=  -lctru -lmbedcrypto -lm
+LIBS    :=  -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries (top level with include/ and lib/)

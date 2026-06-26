@@ -3,9 +3,8 @@
 
 #include <stddef.h>
 
+#include "common.h"
 #include "config.h"
-
-#define SD_PREFIX "sdmc:"
 
 typedef struct {
     char sd_path[CFG_STR_MAX * 2];

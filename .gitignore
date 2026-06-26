@@ -1,6 +1,9 @@
 **/token.txt
 *.pat
 
+# CA bundle — downloaded to SD by the user, not vendored
+cacert.pem
+
 # macOS
 .DS_Store
 

@@ -58,44 +58,8 @@ make clean
 # .cia target is added at M8
 ```
 
-Deploy: copy `savesync.3dsx` to `sdmc:/3ds/savesync/` on the SD card and launch it
-from the Homebrew Launcher.
+Deploy: Open Homebrew Launcher, press Y, then run:
 
-## Repo layout
-
+```sh
+make send IP=<3ds ip>`
 ```
-.
-├── CLAUDE.md            # agent contract — Claude Code reads it each session
-├── PROGRESS.md          # milestone tracker / multi-session recovery
-├── README.md
-├── docs/
-│   └── PLAN.md          # full design + build plan
-├── source/              # C/C++ sources (libctru) — devkitPro convention
-├── Makefile             # devkitPro build (added at M0)
-└── .gitignore
-```
-
-## .gitignore (create this)
-
-```gitignore
-# secrets — never commit
-**/token.txt
-*.pat
-
-# build artifacts
-build/
-*.3dsx
-*.cia
-*.elf
-*.smdh
-```
-
-## Handing this to Claude Code
-
-1. Put these files in the repo (`PLAN.md` → `docs/PLAN.md`), `git init`, add `.gitignore`.
-2. Start `claude` in the directory.
-3. Tell it: _read `docs/PLAN.md` and `PROGRESS.md`, then begin at M0; do one milestone at a
-   time, stop after each for me to verify, and update `PROGRESS.md` before ending._
-
-Claude Code builds on your machine but cannot run on the 3DS, so milestones flagged _[hw]_ in
-`PROGRESS.md` are verified by you flashing and testing on hardware.
