@@ -20,8 +20,8 @@ MVP cutline is **M7** — a working text-mode two-way sync for EasyRPG `.lsd`. M
 - [x] **M2** — Compute the git blob sha of each matched file (mbedtls sha1). Print them.
 - [x] **M3** _[hw]_ — HTTPS `GET` to the GitHub Contents API with TLS verification ON. Riskiest piece — isolate and prove it.
 - [x] **M4** _[hw]_ — Seed-push one `.lsd` via Contents API `PUT`; confirm the commit on GitHub. First end-to-end success.
-- [ ] ▶ **M5** _[hw]_ — Three-way sync + `state.json`; wire Sync All (happy path); pulls write via temp + backup + swap. _(built; **awaiting hardware verification** — see test plan below)_
-- [ ] **M6** _[hw]_ — Conflict prompt (Keep Local / Take Remote / Keep Both / Skip) and each action.
+- [x] **M5** _[hw]_ — Three-way sync + `state.json`; wire Sync All (happy path); pulls write via temp + backup + swap.
+- [ ] ▶ **M6** _[hw]_ — Conflict prompt (Keep Local / Take Remote / Keep Both / Skip) and each action. _(built; **awaiting hardware verification** — trigger a conflict, test each button)_
 - [ ] **M7** _[hw]_ — Text status-list UI: auto-scan on launch, status badges, Sync All, per-file force-push/pull. **← MVP.**
 - [ ] **M8** — `.cia` target: banner, icon, title ID, FS-access exheader.
 - [ ] **M9** — citro2d graphical UI: touch buttons, polished conflict card.
@@ -53,3 +53,10 @@ MVP cutline is **M7** — a working text-mode two-way sync for EasyRPG `.lsd`. M
   3. **Edit a save on the SD** (e.g. play the game, Save01 changes): expect Save01 = `pushed`, others `in-sync`. Confirm a new commit on GitHub.
   4. **Edit the file on GitHub** (web UI or PC clone, change Save02, push): expect Save02 = `pulled` (overwritten on SD from remote, with a backup in `backups/`), others `in-sync`.
   5. **Change both the SD copy and the GitHub copy differently**: expect `CONFLICT` for that file (no auto-resolution — M6 handles the prompt).
+- _(M5 verified)_ Human ran the full 5-step test plan on hardware. Three bugs found + fixed during verification:
+  1. **NULL deref (data abort)**: `state_load` returned `entries=NULL` when `state.json` didn't exist → `state_upsert` crashed. Fixed: always allocate an initial 16-entry array.
+  2. **FAT rename refuses to overwrite**: `state.json` (and pulled saves) never persisted → `base_sha` always missing → every run after the first saw conflicts. Fixed: `remove()` destination before `rename()` in both `state_save` and `write_remote_to_sd` (standard devkitPro/FAT workaround; the pre-overwrite backup is the real safety net for the tiny gap).
+  3. **base64 `\n` corruption on pull**: GitHub wraps base64 content with `\n` every 76 chars (JSON escape `\n`); `extract_b64_field` converted `\n` to literal `n` → `MBEDTLS_ERR_BASE64_INVALID_CHARACTER (-44)`. Fixed: skip `\n`/`\r` escapes entirely in the extractor.
+  4. **State parser didn't skip whitespace after inner `{`**: `base_sha` was never read from `state.json` → `base_sha` always empty → `remote_changed` always true → conflicts. Fixed: added missing `p = skip_ws(p)` after the inner `{`.
+  After all fixes: step 1 (seed) ✓, step 2 (re-run in-sync) ✓, step 3 (edit SD → pushed) ✓, step 4 (edit GitHub → pulled with backup) ✓, step 5 (edit both → conflict) ✓. **M5 done — the core sync engine works end-to-end.** Commit `ac0d39d` feat: three-way sync with state.json and sync all. Moving to **M6**.
+- _(M6 build)_ Added conflict resolution to `sync.[ch]`: `sync_resolve()` takes a `resolve_action_t` (KEEP_LOCAL / TAKE_REMOTE / KEEP_BOTH / SKIP) and re-fetches the remote, then acts: **Keep Local** = force-push local with `sha=remote`; **Take Remote** = pull via temp+backup+swap (reuses `write_remote_to_sd`); **Keep Both** = writes remote content to `<sd_path>.conflict` then pushes local; **Skip** = no-op. Extracted `write_remote_file_to_path` helper for the `.conflict` write (no backup needed — it's a new file). Wired into `main.c`: when `sync_file` returns `SYNC_CONFLICT`, prints `1 Keep Local  2 Take Remote  3 Keep Both  4 Skip` and waits for button press — **A**=Keep Local, **B**=Take Remote, **X**=Keep Both, **Y**=Skip — then calls `sync_resolve` and prints the result. Build clean; `savesync.3dsx` 979K. **STOP — awaiting human to trigger a conflict (change both SD + GitHub) and test each of the 4 actions.**

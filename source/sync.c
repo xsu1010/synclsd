@@ -270,6 +270,156 @@ int sync_file(const github_config_t* gh,
     return 0;
 }
 
+static int write_remote_file_to_path(const char* path, const remote_file_t* rf,
+                                     char* errbuf, size_t errbufsz)
+{
+    size_t dec_len = 0;
+    int rc = mbedtls_base64_decode(NULL, 0, &dec_len,
+                                   (const unsigned char*)rf->content_b64,
+                                   rf->content_b64_len);
+    if (rc != 0 && rc != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) {
+        snprintf(errbuf, errbufsz, "b64 size: %d", rc);
+        return -1;
+    }
+
+    unsigned char* raw = malloc(dec_len ? dec_len : 1);
+    if (!raw) {
+        snprintf(errbuf, errbufsz, "oom");
+        return -2;
+    }
+
+    size_t wrote = 0;
+    rc = mbedtls_base64_decode(raw, dec_len, &wrote,
+                               (const unsigned char*)rf->content_b64,
+                               rf->content_b64_len);
+    if (rc != 0) {
+        snprintf(errbuf, errbufsz, "b64 decode: %d", rc);
+        free(raw);
+        return -3;
+    }
+
+    FILE* fp = fopen(path, "wb");
+    if (!fp) {
+        snprintf(errbuf, errbufsz, "cannot write %.200s", path);
+        free(raw);
+        return -4;
+    }
+
+    if (fwrite(raw, 1, wrote, fp) != wrote) {
+        snprintf(errbuf, errbufsz, "write failed");
+        fclose(fp);
+        free(raw);
+        return -5;
+    }
+    free(raw);
+
+    if (fclose(fp) != 0) {
+        snprintf(errbuf, errbufsz, "close failed");
+        return -6;
+    }
+    return 0;
+}
+
+int sync_resolve(const github_config_t* gh,
+                 const char* bearer_token,
+                 const char* repo_path,
+                 const char* sd_path,
+                 state_t* st,
+                 resolve_action_t action,
+                 sync_outcome_t* out)
+{
+    out->result = SYNC_ERROR;
+    out->detail[0] = '\0';
+
+    char ts[32];
+    iso_timestamp(ts, sizeof(ts));
+
+    if (action == RESOLVE_SKIP) {
+        out->result = SYNC_SKIPPED;
+        return 0;
+    }
+
+    char local_sha[GIT_SHA1_HEX_LEN];
+    char berr[256];
+
+    remote_file_t rf;
+    memset(&rf, 0, sizeof(rf));
+    char aerr[512];
+    if (api_get_remote(gh, bearer_token, repo_path, &rf, aerr, sizeof(aerr)) != 0) {
+        snprintf(out->detail, sizeof(out->detail), "get remote: %.200s", aerr);
+        out->result = SYNC_ERROR;
+        return -1;
+    }
+    if (!rf.present) {
+        snprintf(out->detail, sizeof(out->detail), "remote gone");
+        out->result = SYNC_ERROR;
+        remote_file_free(&rf);
+        return -2;
+    }
+
+    if (action == RESOLVE_TAKE_REMOTE) {
+        char werr[256];
+        if (write_remote_to_sd(sd_path, &rf, werr, sizeof(werr)) != 0) {
+            snprintf(out->detail, sizeof(out->detail), "pull write: %.200s", werr);
+            out->result = SYNC_ERROR;
+            remote_file_free(&rf);
+            return -3;
+        }
+        state_upsert(st, repo_path, rf.sha, ts);
+        out->result = SYNC_PULLED;
+        remote_file_free(&rf);
+        return 0;
+    }
+
+    if (action == RESOLVE_KEEP_BOTH) {
+        char conflict_path[CFG_STR_MAX * 2];
+        int n = snprintf(conflict_path, sizeof(conflict_path), "%s.conflict", sd_path);
+        if (n < 0 || (size_t)n >= sizeof(conflict_path)) {
+            snprintf(out->detail, sizeof(out->detail), "conflict path too long");
+            out->result = SYNC_ERROR;
+            remote_file_free(&rf);
+            return -4;
+        }
+        char werr[256];
+        if (write_remote_file_to_path(conflict_path, &rf, werr, sizeof(werr)) != 0) {
+            snprintf(out->detail, sizeof(out->detail), "write .conflict: %.200s", werr);
+            out->result = SYNC_ERROR;
+            remote_file_free(&rf);
+            return -5;
+        }
+    }
+
+    if (action == RESOLVE_KEEP_LOCAL || action == RESOLVE_KEEP_BOTH) {
+        if (blobsha_file(sd_path, local_sha, berr, sizeof(berr)) != 0) {
+            snprintf(out->detail, sizeof(out->detail), "local sha: %.200s", berr);
+            out->result = SYNC_ERROR;
+            remote_file_free(&rf);
+            return -6;
+        }
+        char msg[160];
+        const char* prefix = (action == RESOLVE_KEEP_BOTH) ? "savesync: keep-both push" : "savesync: force-push";
+        snprintf(msg, sizeof(msg), "%s %.80s", prefix, repo_path);
+        if (api_update_push(gh, bearer_token, repo_path, sd_path, rf.sha, msg,
+                            aerr, sizeof(aerr)) != 0) {
+            snprintf(out->detail, sizeof(out->detail), "push: %.200s", aerr);
+            out->result = SYNC_ERROR;
+            remote_file_free(&rf);
+            return -7;
+        }
+        state_upsert(st, repo_path, local_sha, ts);
+        out->result = SYNC_PUSHED;
+        if (action == RESOLVE_KEEP_BOTH) {
+            snprintf(out->detail, sizeof(out->detail), "remote saved to .conflict, local pushed");
+        }
+        remote_file_free(&rf);
+        return 0;
+    }
+
+    out->result = SYNC_SKIPPED;
+    remote_file_free(&rf);
+    return 0;
+}
+
 const char* sync_result_str(sync_result_t r)
 {
     switch (r) {

@@ -125,15 +125,51 @@ int main(int argc, char* argv[])
             int rc = sync_file(&cfg.github, token, files[j].repo_path,
                                files[j].sd_path, &st, &o);
             const char* tag = sync_result_str(o.result);
-            if (rc == 0 && o.detail[0]) {
+
+            if (o.result == SYNC_CONFLICT) {
+                printf("  CONFLICT: %s\n", o.detail);
+                printf("  1 Keep Local  2 Take Remote  3 Keep Both  4 Skip\n");
+                gfxFlushBuffers();
+                gfxSwapBuffers();
+
+                resolve_action_t action = RESOLVE_SKIP;
+                int got = 0;
+                while (aptMainLoop() && !got) {
+                    gspWaitForVBlank();
+                    hidScanInput();
+                    u32 k = hidKeysDown();
+                    if (k & KEY_A)      { action = RESOLVE_KEEP_LOCAL;  got = 1; }
+                    else if (k & KEY_B) { action = RESOLVE_TAKE_REMOTE; got = 1; }
+                    else if (k & KEY_X) { action = RESOLVE_KEEP_BOTH;   got = 1; }
+                    else if (k & KEY_Y) { action = RESOLVE_SKIP;        got = 1; }
+                    gfxFlushBuffers();
+                    gfxSwapBuffers();
+                }
+
+                sync_outcome_t ro;
+                int rrc = sync_resolve(&cfg.github, token, files[j].repo_path,
+                                       files[j].sd_path, &st, action, &ro);
+                tag = sync_result_str(ro.result);
+                if (rrc == 0 && ro.detail[0]) {
+                    printf("  -> %s: %s\n", tag, ro.detail);
+                } else if (rrc == 0) {
+                    printf("  -> %s\n", tag);
+                } else {
+                    printf("  -> %s: %s\n", tag, ro.detail);
+                    errors++;
+                }
+                counts[ro.result]++;
+            } else if (rc == 0 && o.detail[0]) {
                 printf("  %s: %s\n", tag, o.detail);
+                counts[o.result]++;
             } else if (rc == 0) {
                 printf("  %s\n", tag);
+                counts[o.result]++;
             } else {
                 printf("  %s: %s\n", tag, o.detail);
                 errors++;
+                counts[o.result]++;
             }
-            counts[o.result]++;
         }
         sdscan_free(files);
     }
