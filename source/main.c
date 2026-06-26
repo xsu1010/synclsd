@@ -4,22 +4,179 @@
 #include <3ds.h>
 
 #include "config.h"
-#include "sdscan.h"
-#include "blobsha.h"
-#include "net.h"
 #include "pat.h"
+#include "net.h"
 #include "state.h"
+#include "status.h"
 #include "sync.h"
+#include "api.h"
 
 #define CONFIG_PATH SD_PREFIX "/3ds/savesync/config.toml"
 
-static void print_config(const config_t* cfg)
+static file_list_t g_files;
+static state_t g_state;
+static config_t g_cfg;
+static char g_token[PAT_MAX];
+static int g_cursor = 0;
+static int g_net_ok = 0;
+static int g_exited_normally = 0;
+
+static const char* basename(const char* path)
+{
+    const char* s = strrchr(path, '/');
+    return s ? s + 1 : path;
+}
+
+static void render_header(void)
 {
     printf("\x1b[1;1H");
-    printf("3DS Save Sync\n");
-    printf("M5: three-way sync\n\n");
+    printf("3DS Save Sync                    [MVP]\n");
     printf("GitHub: %s/%s  branch=%s\n\n",
-           cfg->github.owner, cfg->github.repo, cfg->github.branch);
+           g_cfg.github.owner, g_cfg.github.repo, g_cfg.github.branch);
+}
+
+static void render_list(void)
+{
+    int max_rows = 20;
+    int start = 0;
+    if (g_files.count > (size_t)max_rows && (size_t)g_cursor >= g_files.count - max_rows) {
+        start = (int)g_files.count - max_rows;
+    }
+    if (g_cursor > start + max_rows - 1) start = g_cursor - max_rows + 1;
+    if (start < 0) start = 0;
+
+    printf("  #  Status       File\n");
+    for (int i = start; i < (int)g_files.count && i < start + max_rows; i++) {
+        const file_entry_t* fe = &g_files.files[i];
+        const char* arrow = (i == g_cursor) ? ">" : " ";
+        printf("%s%-2d  %s  %.30s\n", arrow, i + 1, status_str(fe->status),
+               basename(fe->repo_path));
+    }
+
+    printf("\nA: Sync  X: Force-push  Y: Force-pull\n");
+    printf("L: Sync All  START: Exit\n");
+}
+
+static void handle_conflict(int idx)
+{
+    file_entry_t* fe = &g_files.files[idx];
+    printf("\x1b[2J\x1b[1;1H");
+    printf("CONFLICT\n%s\n\n", fe->repo_path);
+    printf("A: Keep Local  B: Take Remote\n");
+    printf("X: Keep Both   Y: Skip\n");
+
+    int got = 0;
+    resolve_action_t action = RESOLVE_SKIP;
+    while (aptMainLoop() && !got) {
+        gspWaitForVBlank();
+        hidScanInput();
+        u32 k = hidKeysDown();
+        if (k & KEY_A)      { action = RESOLVE_KEEP_LOCAL;  got = 1; }
+        else if (k & KEY_B) { action = RESOLVE_TAKE_REMOTE; got = 1; }
+        else if (k & KEY_X) { action = RESOLVE_KEEP_BOTH;   got = 1; }
+        else if (k & KEY_Y) { action = RESOLVE_SKIP;        got = 1; }
+        gfxFlushBuffers();
+        gfxSwapBuffers();
+    }
+
+    sync_outcome_t o;
+    sync_resolve(&g_cfg.github, g_token, fe->repo_path, fe->sd_path,
+                 &g_state, action, &o);
+    printf("\n-> %s: %s\n", sync_result_str(o.result),
+           o.detail[0] ? o.detail : "");
+    printf("\npress any key...\n");
+    gfxFlushBuffers();
+    gfxSwapBuffers();
+
+    int wait = 0;
+    while (aptMainLoop() && !wait) {
+        gspWaitForVBlank();
+        hidScanInput();
+        if (hidKeysDown()) wait = 1;
+        gfxFlushBuffers();
+        gfxSwapBuffers();
+    }
+
+    char serr[256];
+    state_save(&g_state, serr, sizeof(serr));
+    status_refresh_one(&g_cfg.github, g_token, &g_state, fe);
+}
+
+static void sync_selected(void)
+{
+    file_entry_t* fe = &g_files.files[g_cursor];
+    sync_outcome_t o;
+    int rc = sync_file(&g_cfg.github, g_token, fe->repo_path, fe->sd_path,
+                       &g_state, &o);
+
+    if (o.result == SYNC_CONFLICT) {
+        handle_conflict(g_cursor);
+        return;
+    }
+
+    char serr[256];
+    state_save(&g_state, serr, sizeof(serr));
+    status_refresh_one(&g_cfg.github, g_token, &g_state, fe);
+    (void)rc;
+}
+
+static void force_push_selected(void)
+{
+    file_entry_t* fe = &g_files.files[g_cursor];
+    char ts[32];
+    time_t t = time(NULL);
+    strftime(ts, sizeof(ts), "%Y-%m-%dT%H-%M-%SZ", gmtime(&t));
+
+    if (!fe->has_remote) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "savesync: seed-push %.80s", fe->repo_path);
+        char aerr[256];
+        api_seed_push(&g_cfg.github, g_token, fe->repo_path, fe->sd_path,
+                      msg, aerr, sizeof(aerr));
+    } else {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "savesync: force-push %.80s", fe->repo_path);
+        char aerr[256];
+        api_update_push(&g_cfg.github, g_token, fe->repo_path, fe->sd_path,
+                        fe->remote_sha, msg, aerr, sizeof(aerr));
+    }
+    state_upsert(&g_state, fe->repo_path, fe->local_sha, ts);
+    char serr[256];
+    state_save(&g_state, serr, sizeof(serr));
+    status_refresh_one(&g_cfg.github, g_token, &g_state, fe);
+}
+
+static void force_pull_selected(void)
+{
+    file_entry_t* fe = &g_files.files[g_cursor];
+    if (!fe->has_remote) return;
+
+    sync_outcome_t o;
+    resolve_action_t action = RESOLVE_TAKE_REMOTE;
+    sync_resolve(&g_cfg.github, g_token, fe->repo_path, fe->sd_path,
+                 &g_state, action, &o);
+    char serr[256];
+    state_save(&g_state, serr, sizeof(serr));
+    status_refresh_one(&g_cfg.github, g_token, &g_state, fe);
+}
+
+static void sync_all(void)
+{
+    for (size_t i = 0; i < g_files.count; i++) {
+        file_entry_t* fe = &g_files.files[i];
+        sync_outcome_t o;
+        sync_file(&g_cfg.github, g_token, fe->repo_path, fe->sd_path,
+                  &g_state, &o);
+
+        if (o.result == SYNC_CONFLICT) {
+            g_cursor = (int)i;
+            handle_conflict((int)i);
+        }
+
+        status_refresh_one(&g_cfg.github, g_token, &g_state, fe);
+    }
+    char serr[256];
+    state_save(&g_state, serr, sizeof(serr));
 }
 
 int main(int argc, char* argv[])
@@ -30,181 +187,84 @@ int main(int argc, char* argv[])
     gfxInitDefault();
     consoleInit(GFX_BOTTOM, NULL);
 
-    printf("\x1b[2J");
-
-    config_t cfg;
     char err[256];
-    if (config_load(CONFIG_PATH, &cfg, err, sizeof(err)) != 0) {
-        printf("\x1b[1;1H");
-        printf("3DS Save Sync\n\n");
-        printf("config error:\n%s\n\n", err);
-        printf("Expected: %s\n\n", CONFIG_PATH);
-        printf("Press START to exit.\n");
+    if (config_load(CONFIG_PATH, &g_cfg, err, sizeof(err)) != 0) {
+        printf("\x1b[2J\x1b[1;1H");
+        printf("3DS Save Sync\n\nconfig error:\n%s\n\nExpected: %s\n\nPress START to exit.\n",
+               err, CONFIG_PATH);
         goto loop;
     }
 
-    print_config(&cfg);
-
-    size_t total = 0;
-    for (size_t i = 0; i < cfg.watch_count; i++) {
-        const watch_config_t* w = &cfg.watches[i];
-        printf("[%s] %s  %s\n", w->name, w->path, w->glob);
-
-        matched_file_t* files = NULL;
-        size_t count = 0;
-        char serr[256];
-        if (sdscan_watch(w, &files, &count, serr, sizeof(serr)) == 0) {
-            for (size_t j = 0; j < count; j++) {
-                char sha[GIT_SHA1_HEX_LEN];
-                char berr[256];
-                if (blobsha_file(files[j].sd_path, sha, berr, sizeof(berr)) == 0) {
-                    printf("  %s  %s\n", sha, files[j].repo_path);
-                } else {
-                    printf("  [sha err] %s  (%s)\n", files[j].repo_path, berr);
-                }
-            }
-            if (count == 0) {
-                printf("  (no matches)\n");
-            }
-            printf("  -> %zu file(s)\n\n", count);
-            sdscan_free(files);
-            total += count;
-        } else {
-            printf("  ! %s\n\n", serr);
-        }
-    }
-
-    printf("Total: %zu file(s)\n\n", total);
-
-    printf("-- M5: Sync All --\n");
-
-    char token[PAT_MAX];
-    char terr[256];
-    if (pat_read(token, sizeof(token), terr, sizeof(terr)) != 0) {
-        printf("token: %s\n", terr);
-        config_free(&cfg);
+    if (pat_read(g_token, sizeof(g_token), err, sizeof(err)) != 0) {
+        printf("\x1b[2J\x1b[1;1H");
+        printf("3DS Save Sync\n\ntoken error: %s\n\nPress START to exit.\n", err);
+        config_free(&g_cfg);
         goto loop;
     }
-    printf("token: read OK (%zu chars)\n", strlen(token));
 
-    char nerr[256];
-    if (net_init(nerr, sizeof(nerr)) != 0) {
-        printf("net: %s\n", nerr);
-        config_free(&cfg);
+    if (net_init(err, sizeof(err)) != 0) {
+        printf("\x1b[2J\x1b[1;1H");
+        printf("3DS Save Sync\n\nnet error: %s\n\nPress START to exit.\n", err);
+        config_free(&g_cfg);
         goto loop;
     }
-    printf("net: SOC + curl init OK\n\n");
+    g_net_ok = 1;
 
-    state_t st;
-    char serr2[256];
-    if (state_load(&st, serr2, sizeof(serr2)) != 0) {
-        printf("state: %s\n", serr2);
+    if (state_load(&g_state, err, sizeof(err)) != 0) {
+        printf("\x1b[2J\x1b[1;1H");
+        printf("3DS Save Sync\n\nstate error: %s\n\nPress START to exit.\n", err);
         net_exit();
-        config_free(&cfg);
+        config_free(&g_cfg);
         goto loop;
     }
 
-    int counts[8] = {0};
-    int errors = 0;
+    printf("\x1b[2J\x1b[1;1H");
+    printf("3DS Save Sync\n\nScanning...\n");
+    gfxFlushBuffers();
+    gfxSwapBuffers();
 
-    for (size_t i = 0; i < cfg.watch_count; i++) {
-        const watch_config_t* w = &cfg.watches[i];
-        matched_file_t* files = NULL;
-        size_t count = 0;
-        char scanerr[256];
-        if (sdscan_watch(w, &files, &count, scanerr, sizeof(scanerr)) != 0) {
-            printf("[%s] scan error: %s\n", w->name, scanerr);
-            continue;
-        }
-        for (size_t j = 0; j < count; j++) {
-            printf("%s\n", files[j].repo_path);
-            gfxFlushBuffers();
-            gfxSwapBuffers();
+    status_scan(&g_cfg, g_token, &g_state, &g_files);
 
-            sync_outcome_t o;
-            int rc = sync_file(&cfg.github, token, files[j].repo_path,
-                               files[j].sd_path, &st, &o);
-            const char* tag = sync_result_str(o.result);
-
-            if (o.result == SYNC_CONFLICT) {
-                printf("  CONFLICT: %s\n", o.detail);
-                printf("  1 Keep Local  2 Take Remote  3 Keep Both  4 Skip\n");
-                gfxFlushBuffers();
-                gfxSwapBuffers();
-
-                resolve_action_t action = RESOLVE_SKIP;
-                int got = 0;
-                while (aptMainLoop() && !got) {
-                    gspWaitForVBlank();
-                    hidScanInput();
-                    u32 k = hidKeysDown();
-                    if (k & KEY_A)      { action = RESOLVE_KEEP_LOCAL;  got = 1; }
-                    else if (k & KEY_B) { action = RESOLVE_TAKE_REMOTE; got = 1; }
-                    else if (k & KEY_X) { action = RESOLVE_KEEP_BOTH;   got = 1; }
-                    else if (k & KEY_Y) { action = RESOLVE_SKIP;        got = 1; }
-                    gfxFlushBuffers();
-                    gfxSwapBuffers();
-                }
-
-                sync_outcome_t ro;
-                int rrc = sync_resolve(&cfg.github, token, files[j].repo_path,
-                                       files[j].sd_path, &st, action, &ro);
-                tag = sync_result_str(ro.result);
-                if (rrc == 0 && ro.detail[0]) {
-                    printf("  -> %s: %s\n", tag, ro.detail);
-                } else if (rrc == 0) {
-                    printf("  -> %s\n", tag);
-                } else {
-                    printf("  -> %s: %s\n", tag, ro.detail);
-                    errors++;
-                }
-                counts[ro.result]++;
-            } else if (rc == 0 && o.detail[0]) {
-                printf("  %s: %s\n", tag, o.detail);
-                counts[o.result]++;
-            } else if (rc == 0) {
-                printf("  %s\n", tag);
-                counts[o.result]++;
-            } else {
-                printf("  %s: %s\n", tag, o.detail);
-                errors++;
-                counts[o.result]++;
-            }
-        }
-        sdscan_free(files);
-    }
-
-    char saveerr[256];
-    if (state_save(&st, saveerr, sizeof(saveerr)) != 0) {
-        printf("\nstate save FAILED: %s\n", saveerr);
-    } else {
-        printf("\nstate saved.\n");
-    }
-    state_free(&st);
-
-    printf("\nSync All done:\n");
-    printf("  in-sync: %d  pushed: %d  pulled: %d  seeded: %d\n",
-           counts[SYNC_IN_SYNC], counts[SYNC_PUSHED], counts[SYNC_PULLED], counts[SYNC_SEEDED]);
-    printf("  conflicts: %d  skipped: %d  errors: %d\n",
-           counts[SYNC_CONFLICT], counts[SYNC_SKIPPED], errors);
-
-    net_exit();
-    config_free(&cfg);
-
-loop:
-    printf("Press START to exit.\n");
-
+    printf("\x1b[2J");
     while (aptMainLoop())
     {
-        gspWaitForVBlank();
-        hidScanInput();
-
-        u32 kDown = hidKeysDown();
-        if (kDown & KEY_START)
-            break;
-
+        render_header();
+        render_list();
         gfxFlushBuffers();
         gfxSwapBuffers();
+
+        gspWaitForVBlank();
+        hidScanInput();
+        u32 k = hidKeysDown();
+
+        if (k & KEY_START) break;
+        if (k & KEY_UP)    { if (g_cursor > 0) g_cursor--; }
+        if (k & KEY_DOWN)  { if ((size_t)g_cursor + 1 < g_files.count) g_cursor++; }
+        if (k & KEY_A)     sync_selected();
+        if (k & KEY_X)     force_push_selected();
+        if (k & KEY_Y)     force_pull_selected();
+        if (k & KEY_L)     sync_all();
+    }
+
+    g_exited_normally = 1;
+    file_list_free(&g_files);
+    char serr[256];
+    state_save(&g_state, serr, sizeof(serr));
+    state_free(&g_state);
+
+loop:
+    if (g_net_ok) net_exit();
+    config_free(&g_cfg);
+
+    if (!g_exited_normally) {
+        while (aptMainLoop())
+        {
+            gspWaitForVBlank();
+            hidScanInput();
+            if (hidKeysDown() & KEY_START) break;
+            gfxFlushBuffers();
+            gfxSwapBuffers();
+        }
     }
 
     gfxExit();
