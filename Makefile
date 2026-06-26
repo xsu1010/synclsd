@@ -23,9 +23,9 @@ SOURCES         :=  source libs/tomlc99
 DATA            :=  data
 INCLUDES        :=  include libs/tomlc99
 
-APP_TITLE       :=  3DS Save Sync
-APP_DESCRIPTION :=  Sync loose SD save files to a private GitHub repo
-APP_AUTHOR      :=  synclsd
+APP_TITLE       :=  suzinho's OFF save sync
+APP_DESCRIPTION :=  on a mission to purify the world
+APP_AUTHOR      :=  xsu
 
 #---------------------------------------------------------------------------------
 # options for code generation
