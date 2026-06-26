@@ -1,0 +1,22 @@
+# 3DS Save Sync - example config
+# Copy to sdmc:/3ds/savesync/config.toml and edit.
+# token.txt (your fine-grained PAT) goes in the same folder, kept separate.
+
+[github]
+owner  = "your-username"
+repo   = "3ds-saves"
+branch = "main"
+
+# One block per save location. `glob` filters within `path`.
+# `path` is relative to the SD root (leading slash). Omit `dest` to mirror
+# the SD path verbatim into the repo (the chosen default).
+[[watch]]
+name = "easyrpg-mygame"
+path = "/3ds/easyrpg-player/games/MyGame"
+glob = "*.lsd"
+
+# Example: RetroArch SRAM saves
+# [[watch]]
+# name = "retroarch-sram"
+# path = "/3ds/retroarch/saves"
+# glob = "*.srm"

@@ -1,0 +1,12 @@
+**/token.txt
+*.pat
+
+# macOS
+.DS_Store
+
+# build artifacts
+build/
+*.3dsx
+*.cia
+*.elf
+*.smdh
