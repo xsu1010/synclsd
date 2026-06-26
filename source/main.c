@@ -8,6 +8,7 @@
 #include "blobsha.h"
 #include "net.h"
 #include "pat.h"
+#include "api.h"
 
 #define CONFIG_PATH SD_PREFIX "/3ds/savesync/config.toml"
 #define API_BASE     "https://api.github.com/repos/"
@@ -16,7 +17,7 @@ static void print_config(const config_t* cfg)
 {
     printf("\x1b[1;1H");
     printf("3DS Save Sync\n");
-    printf("M3: HTTPS GET\n\n");
+    printf("M4: seed-push\n\n");
     printf("GitHub: %s/%s  branch=%s\n\n",
            cfg->github.owner, cfg->github.repo, cfg->github.branch);
 }
@@ -75,7 +76,7 @@ int main(int argc, char* argv[])
 
     printf("Total: %zu file(s)\n\n", total);
 
-    printf("-- M3: HTTPS GET test --\n");
+    printf("-- M4: seed-push --\n");
 
     char token[PAT_MAX];
     char terr[256];
@@ -95,40 +96,36 @@ int main(int argc, char* argv[])
     printf("net: SOC + curl init OK\n");
 
     if (cfg.watch_count > 0 && cfg.watches[0].path[0]) {
-        char url[CFG_STR_MAX * 2];
         const watch_config_t* w0 = &cfg.watches[0];
-        int un = snprintf(url, sizeof(url),
-                          "%s%s/%s/contents%s?ref=%s",
-                          API_BASE, cfg.github.owner, cfg.github.repo,
-                          w0->path, cfg.github.branch);
-        if (un < 0 || (size_t)un >= sizeof(url)) {
-            printf("url: too long\n");
+        matched_file_t* files = NULL;
+        size_t count = 0;
+        char serr[256];
+        if (sdscan_watch(w0, &files, &count, serr, sizeof(serr)) != 0) {
+            printf("scan: %s\n", serr);
+        } else if (count == 0) {
+            printf("no files in first watch to push\n");
         } else {
-            printf("GET %s\n", url);
-            char* body = NULL;
-            size_t body_len = 0;
-            long http_code = 0;
-            printf("... fetching ...\n");
+            const matched_file_t* f = &files[0];
+            printf("pushing: %s\n", f->repo_path);
+            printf("  from: %s\n", f->sd_path);
+            printf("  ... uploading ...\n");
             gfxFlushBuffers();
             gfxSwapBuffers();
 
-            if (https_get(url, token, &body, &body_len, &http_code, nerr, sizeof(nerr)) == 0) {
-                printf("HTTP %ld, %zu bytes\n", http_code, body_len);
-                size_t show = body_len < 240 ? body_len : 240;
-                printf("--- body (first %zu) ---\n", show);
-                for (size_t i = 0; i < show; i++) {
-                    char c = body[i];
-                    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-                    putchar(c);
-                }
-                printf("\n--- end ---\n");
-                free(body);
+            char msg[160];
+            snprintf(msg, sizeof(msg), "savesync: seed-push %.80s", f->repo_path);
+            char aerr[512];
+            int rc = api_seed_push(&cfg.github, token, f->repo_path, f->sd_path,
+                                   msg, aerr, sizeof(aerr));
+            if (rc == 0) {
+                printf("  PUSHED OK — check GitHub for the commit!\n");
             } else {
-                printf("https_get failed: %s\n", nerr);
+                printf("  push FAILED: %s\n", aerr);
             }
         }
+        sdscan_free(files);
     } else {
-        printf("no watch to test\n");
+        printf("no watch to push\n");
     }
 
     net_exit();

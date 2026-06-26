@@ -17,4 +17,11 @@ int https_get(const char* url,
               long* out_http_code,
               char* errbuf, size_t errbufsz);
 
+int https_put(const char* url,
+              const char* bearer_token,
+              const char* body, size_t body_len,
+              char** out_resp, size_t* out_resp_len,
+              long* out_http_code,
+              char* errbuf, size_t errbufsz);
+
 #endif

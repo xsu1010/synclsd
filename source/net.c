@@ -147,3 +147,75 @@ int https_get(const char* url,
     curl_easy_cleanup(h);
     return rc;
 }
+
+int https_put(const char* url,
+              const char* bearer_token,
+              const char* body, size_t body_len,
+              char** out_resp, size_t* out_resp_len,
+              long* out_http_code,
+              char* errbuf, size_t errbufsz)
+{
+    *out_resp = NULL;
+    *out_resp_len = 0;
+    if (out_http_code) *out_http_code = 0;
+
+    CURL* h = curl_easy_init();
+    if (!h) {
+        snprintf(errbuf, errbufsz, "curl_easy_init failed");
+        return -1;
+    }
+
+    write_ctx_t wc = {0, 0, 0};
+
+    struct curl_slist* headers = NULL;
+    char auth_hdr[256];
+    int n = snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", bearer_token);
+    if (n < 0 || (size_t)n >= sizeof(auth_hdr)) {
+        snprintf(errbuf, errbufsz, "auth header too long");
+        curl_easy_cleanup(h);
+        return -2;
+    }
+    headers = curl_slist_append(headers, auth_hdr);
+    headers = curl_slist_append(headers, "Accept: application/vnd.github+json");
+    headers = curl_slist_append(headers, "X-GitHub-Api-Version: 2022-11-28");
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, USER_AGENT);
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, &wc);
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+
+    curl_easy_setopt(h, CURLOPT_CUSTOMREQUEST, "PUT");
+    curl_easy_setopt(h, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE, (long)body_len);
+
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(h, CURLOPT_CAINFO, CA_BUNDLE_PATH);
+
+    curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 15L);
+
+    CURLcode c = curl_easy_perform(h);
+
+    long code = 0;
+    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
+    if (out_http_code) *out_http_code = code;
+
+    int rc;
+    if (c != CURLE_OK) {
+        snprintf(errbuf, errbufsz, "curl: %s", curl_easy_strerror(c));
+        free(wc.data);
+        rc = -3;
+    } else {
+        *out_resp = wc.data;
+        *out_resp_len = wc.size;
+        rc = 0;
+    }
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(h);
+    return rc;
+}
