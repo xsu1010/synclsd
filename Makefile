@@ -44,12 +44,12 @@ ASFLAGS :=  -g $(ARCH)
 
 LDFLAGS =   -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS    :=  -lctru -lm
+LIBS    :=  -lctru -lmbedcrypto -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries (top level with include/ and lib/)
 #---------------------------------------------------------------------------------
-LIBDIRS :=  $(CTRULIB)
+LIBDIRS :=  $(CTRULIB) $(PORTLIBS)
 
 #---------------------------------------------------------------------------------
 # no need to edit past this point unless adding rules for new file extensions

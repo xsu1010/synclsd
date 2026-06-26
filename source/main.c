@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include "sdscan.h"
+#include "blobsha.h"
 
 #define CONFIG_PATH SD_PREFIX "/3ds/savesync/config.toml"
 
@@ -48,7 +49,13 @@ int main(int argc, char* argv[])
         char serr[256];
         if (sdscan_watch(w, &files, &count, serr, sizeof(serr)) == 0) {
             for (size_t j = 0; j < count; j++) {
-                printf("  %s\n", files[j].repo_path);
+                char sha[GIT_SHA1_HEX_LEN];
+                char berr[256];
+                if (blobsha_file(files[j].sd_path, sha, berr, sizeof(berr)) == 0) {
+                    printf("  %s  %s\n", sha, files[j].repo_path);
+                } else {
+                    printf("  [sha err] %s  (%s)\n", files[j].repo_path, berr);
+                }
             }
             if (count == 0) {
                 printf("  (no matches)\n");
