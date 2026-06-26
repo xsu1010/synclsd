@@ -127,7 +127,7 @@ endif
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf
+	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(TARGET).cia
 
 #---------------------------------------------------------------------------------
 # send: upload the .3dsx to a 3DS running the Homebrew Launcher netloader (press Y).
@@ -143,6 +143,21 @@ send: $(BUILD) $(DEPSDIR)
 	@3dslink -a $(IP) $(CURDIR)/$(TARGET).3dsx
 
 .PHONY: send
+
+#---------------------------------------------------------------------------------
+# cia: build a .cia for Home Menu installation.
+# Requires makerom + bannertool in PATH (installed to devkitPro tools/bin).
+# Usage: make cia
+#---------------------------------------------------------------------------------
+cia: $(BUILD) $(DEPSDIR)
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+	@echo "building CIA..."
+	@bannertool makebanner -i $(CURDIR)/banner.png -a $(CURDIR)/audio.wav -o $(CURDIR)/$(BUILD)/banner.bnr
+	@bannertool makesmdh -s "$(APP_TITLE)" -l "$(APP_DESCRIPTION)" -p "$(APP_AUTHOR)" -i $(CURDIR)/icon.png -o $(CURDIR)/$(BUILD)/$(TARGET).smdh
+	@makerom -f cia -o $(CURDIR)/$(TARGET).cia -elf $(CURDIR)/$(TARGET).elf -banner $(CURDIR)/$(BUILD)/banner.bnr -icon $(CURDIR)/$(BUILD)/$(TARGET).smdh -rsf $(CURDIR)/cia.rsf -target t
+	@echo "built ... $(TARGET).cia"
+
+.PHONY: cia
 
 #---------------------------------------------------------------------------------
 else
