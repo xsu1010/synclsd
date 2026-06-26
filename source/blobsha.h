@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-#define GIT_SHA1_HEX_LEN 41
+#include "common.h"
 
 int blobsha_file(const char* sd_path, char* hex_out, char* errbuf, size_t errbufsz);
 

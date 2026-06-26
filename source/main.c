@@ -8,16 +8,16 @@
 #include "blobsha.h"
 #include "net.h"
 #include "pat.h"
-#include "api.h"
+#include "state.h"
+#include "sync.h"
 
 #define CONFIG_PATH SD_PREFIX "/3ds/savesync/config.toml"
-#define API_BASE     "https://api.github.com/repos/"
 
 static void print_config(const config_t* cfg)
 {
     printf("\x1b[1;1H");
     printf("3DS Save Sync\n");
-    printf("M4: seed-push\n\n");
+    printf("M5: three-way sync\n\n");
     printf("GitHub: %s/%s  branch=%s\n\n",
            cfg->github.owner, cfg->github.repo, cfg->github.branch);
 }
@@ -76,7 +76,7 @@ int main(int argc, char* argv[])
 
     printf("Total: %zu file(s)\n\n", total);
 
-    printf("-- M4: seed-push --\n");
+    printf("-- M5: Sync All --\n");
 
     char token[PAT_MAX];
     char terr[256];
@@ -93,40 +93,64 @@ int main(int argc, char* argv[])
         config_free(&cfg);
         goto loop;
     }
-    printf("net: SOC + curl init OK\n");
+    printf("net: SOC + curl init OK\n\n");
 
-    if (cfg.watch_count > 0 && cfg.watches[0].path[0]) {
-        const watch_config_t* w0 = &cfg.watches[0];
+    state_t st;
+    char serr2[256];
+    if (state_load(&st, serr2, sizeof(serr2)) != 0) {
+        printf("state: %s\n", serr2);
+        net_exit();
+        config_free(&cfg);
+        goto loop;
+    }
+
+    int counts[8] = {0};
+    int errors = 0;
+
+    for (size_t i = 0; i < cfg.watch_count; i++) {
+        const watch_config_t* w = &cfg.watches[i];
         matched_file_t* files = NULL;
         size_t count = 0;
-        char serr[256];
-        if (sdscan_watch(w0, &files, &count, serr, sizeof(serr)) != 0) {
-            printf("scan: %s\n", serr);
-        } else if (count == 0) {
-            printf("no files in first watch to push\n");
-        } else {
-            const matched_file_t* f = &files[0];
-            printf("pushing: %s\n", f->repo_path);
-            printf("  from: %s\n", f->sd_path);
-            printf("  ... uploading ...\n");
+        char scanerr[256];
+        if (sdscan_watch(w, &files, &count, scanerr, sizeof(scanerr)) != 0) {
+            printf("[%s] scan error: %s\n", w->name, scanerr);
+            continue;
+        }
+        for (size_t j = 0; j < count; j++) {
+            printf("%s\n", files[j].repo_path);
             gfxFlushBuffers();
             gfxSwapBuffers();
 
-            char msg[160];
-            snprintf(msg, sizeof(msg), "savesync: seed-push %.80s", f->repo_path);
-            char aerr[512];
-            int rc = api_seed_push(&cfg.github, token, f->repo_path, f->sd_path,
-                                   msg, aerr, sizeof(aerr));
-            if (rc == 0) {
-                printf("  PUSHED OK — check GitHub for the commit!\n");
+            sync_outcome_t o;
+            int rc = sync_file(&cfg.github, token, files[j].repo_path,
+                               files[j].sd_path, &st, &o);
+            const char* tag = sync_result_str(o.result);
+            if (rc == 0 && o.detail[0]) {
+                printf("  %s: %s\n", tag, o.detail);
+            } else if (rc == 0) {
+                printf("  %s\n", tag);
             } else {
-                printf("  push FAILED: %s\n", aerr);
+                printf("  %s: %s\n", tag, o.detail);
+                errors++;
             }
+            counts[o.result]++;
         }
         sdscan_free(files);
-    } else {
-        printf("no watch to push\n");
     }
+
+    char saveerr[256];
+    if (state_save(&st, saveerr, sizeof(saveerr)) != 0) {
+        printf("\nstate save FAILED: %s\n", saveerr);
+    } else {
+        printf("\nstate saved.\n");
+    }
+    state_free(&st);
+
+    printf("\nSync All done:\n");
+    printf("  in-sync: %d  pushed: %d  pulled: %d  seeded: %d\n",
+           counts[SYNC_IN_SYNC], counts[SYNC_PUSHED], counts[SYNC_PULLED], counts[SYNC_SEEDED]);
+    printf("  conflicts: %d  skipped: %d  errors: %d\n",
+           counts[SYNC_CONFLICT], counts[SYNC_SKIPPED], errors);
 
     net_exit();
     config_free(&cfg);
